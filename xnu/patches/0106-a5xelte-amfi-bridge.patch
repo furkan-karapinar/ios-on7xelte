@@ -1,0 +1,157 @@
+diff --git bsd/kern/bsd_init.c bsd/kern/bsd_init.c
+index 987f8bc..d26e1ee 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -691,8 +691,8 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
+ 
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
+-	/* AMFI's MAC policy is built in on SWEET (bsd/kern/sweet_amfi.c). */
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++	/* Register the built-in AMFI interface before the first exec. */
+ 	extern void sweet_amfi_policy_register(void);
+ 	sweet_amfi_policy_register();
+ #endif
+diff --git bsd/kern/sweet_amfi.c bsd/kern/sweet_amfi.c
+index cb67b4d..c603161 100644
+--- a/bsd/kern/sweet_amfi.c
++++ b/bsd/kern/sweet_amfi.c
+@@ -1,5 +1,5 @@
+ /*
+- * Built-in AMFI interface for SWEET.
++ * Built-in AMFI interface for SWEET and A5XELTE.
+  *
+  * On Apple platforms AppleMobileFileIntegrity registers this interface and
+  * provides entitlements through the closed CoreEntitlements library. SWEET
+@@ -22,7 +22,13 @@
+  * Interfaces no kernel path uses on SWEET (they serve other Apple kexts)
+  * panic with a clear message instead of being NULL.
+  */
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) || defined(ARM64_BOARD_CONFIG_A5XELTE)
++#if defined(ARM64_BOARD_CONFIG_A5XELTE)
++#define PORT_NAME "A5XELTE"
++#else
++#define PORT_NAME "SWEET"
++#endif
++
+ #include <kern/debug.h>
+ #include <kern/startup.h>
+ #include <libkern/amfi/amfi.h>
+@@ -74,7 +80,7 @@ sweet_amfi_entitlements_query(__unused void *os_entitlements,
+     __unused uint8_t cdhash[CS_CDHASH_LEN], __unused CEQuery_t query,
+     __unused size_t query_length)
+ {
+-	panic("SWEET AMFI: CoreEntitlements queries are not implemented");
++	panic(PORT_NAME " AMFI: CoreEntitlements queries are not implemented");
+ }
+ 
+ static bool
+@@ -106,7 +112,7 @@ sweet_amfi_get_udid(__unused const uint8_t **udid, __unused size_t *udid_length)
+ static void *
+ sweet_amfi_query_context_to_object(__unused CEQueryContext_t ctx)
+ {
+-	panic("SWEET AMFI: CoreEntitlements query contexts are not implemented");
++	panic(PORT_NAME " AMFI: CoreEntitlements query contexts are not implemented");
+ }
+ 
+ static kern_return_t
+@@ -132,7 +138,7 @@ sweet_amfi_attach_entitlements(struct cs_blob *code_signing_blob)
+ 	size_t xml_len = 0;
+ 
+ 	if (csblob_get_entitlements(code_signing_blob, &xml, &xml_len) != 0) {
+-		printf("SWEET AMFI: %s: entitlements do not match the code directory, granting none\n",
++		printf(PORT_NAME " AMFI: %s: entitlements do not match the code directory, granting none\n",
+ 		    csblob_get_identity(code_signing_blob));
+ 		return;
+ 	}
+@@ -141,13 +147,13 @@ sweet_amfi_attach_entitlements(struct cs_blob *code_signing_blob)
+ 	}
+ 	void *ent = sweet_entitlements_create(xml, xml_len);
+ 	if (ent == NULL) {
+-		printf("SWEET AMFI: %s: unreadable entitlements (%zu bytes), granting none\n",
++		printf(PORT_NAME " AMFI: %s: unreadable entitlements (%zu bytes), granting none\n",
+ 		    csblob_get_identity(code_signing_blob), xml_len);
+ 		return;
+ 	}
+ 	if (sweet_amfi_debug) {
+ 		/* The test keys only exist in tools/mkinit.py test signatures. */
+-		printf("SWEET AMFI: %s: %u entitlements (test: bool %d string %d array %d)\n",
++		printf(PORT_NAME " AMFI: %s: %u entitlements (test: bool %d string %d array %d)\n",
+ 		    csblob_get_identity(code_signing_blob), sweet_entitlements_count(ent),
+ 		    sweet_entitlements_bool(ent, "com.apple.private.sweet.test-bool"),
+ 		    sweet_entitlements_string(ent, "com.apple.private.sweet.test-string", "hello"),
+@@ -243,7 +249,7 @@ static void
+ sweet_amfi_register(void)
+ {
+ 	amfi_interface_register(&sweet_amfi);
+-	printf("SWEET AMFI: built-in interface registered (XML entitlements)\n");
++	printf(PORT_NAME " AMFI: built-in interface registered (XML entitlements)\n");
+ }
+ STARTUP(EARLY_BOOT, STARTUP_RANK_MIDDLE, sweet_amfi_register);
+ 
+@@ -292,7 +298,7 @@ sweet_sandbox_syscall(struct proc *p, int call, __unused user_addr_t arg)
+ 		sweet_sandbox_seen |= 1ULL << call;
+ 		char name[32];
+ 		proc_name(proc_pid(p), name, sizeof(name));
+-		printf("SWEET Sandbox: %s op %d\n", name, call);
++		printf(PORT_NAME " Sandbox: %s op %d\n", name, call);
+ 	}
+ 	switch (call) {
+ 	case 4:         /* container path (audit token / pid) */
+@@ -341,7 +347,7 @@ sweet_sandbox_priv_grant(kauth_cred_t cred __unused, int priv)
+ 		sweet_priv_logged[sweet_priv_logged_count].priv = priv;
+ 		strlcpy(sweet_priv_logged[sweet_priv_logged_count].name, name, sizeof(name));
+ 		sweet_priv_logged_count++;
+-		printf("SWEET Sandbox: %s privilege %d denied\n", name, priv);
++		printf(PORT_NAME " Sandbox: %s privilege %d denied\n", name, priv);
+ 	}
+ 	return EPERM;
+ }
+@@ -353,15 +359,15 @@ static const struct mac_policy_ops sweet_sandbox_mac_ops = {
+ 
+ static struct mac_policy_conf sweet_sandbox_mac_conf = {
+ 	.mpc_name = "Sandbox",
+-	.mpc_fullname = "SWEET permissive sandbox stand-in",
++	.mpc_fullname = PORT_NAME " permissive sandbox stand-in",
+ 	.mpc_ops = &sweet_sandbox_mac_ops,
+ };
+ 
+ static mac_policy_handle_t sweet_sandbox_mac_handle;
+ 
+ static struct mac_policy_conf sweet_amfi_mac_conf = {
+-	.mpc_name = "SWEET AMFI",
+-	.mpc_fullname = "SWEET built-in Mobile File Integrity",
++	.mpc_name = PORT_NAME " AMFI",
++	.mpc_fullname = PORT_NAME " built-in Mobile File Integrity",
+ 	.mpc_ops = &sweet_amfi_mac_ops,
+ };
+ 
+@@ -374,10 +380,10 @@ void
+ sweet_amfi_policy_register(void)
+ {
+ 	int error = mac_policy_register(&sweet_amfi_mac_conf, &sweet_amfi_mac_handle, NULL);
+-	printf("SWEET AMFI: platform binary policy %s (%d)\n",
++	printf(PORT_NAME " AMFI: platform binary policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ 	error = mac_policy_register(&sweet_sandbox_mac_conf, &sweet_sandbox_mac_handle, NULL);
+-	printf("SWEET Sandbox: permissive policy %s (%d)\n",
++	printf(PORT_NAME " Sandbox: permissive policy %s (%d)\n",
+ 	    error ? "NOT registered" : "registered", error);
+ }
+-#endif /* ARM64_BOARD_CONFIG_SWEET */
++#endif /* SWEET || A5XELTE */
+diff --git iokit/Kernel/arm/SweetEntitlements.cpp iokit/Kernel/arm/SweetEntitlements.cpp
+index 6186541..d330a8c 100644
+--- a/iokit/Kernel/arm/SweetEntitlements.cpp
++++ b/iokit/Kernel/arm/SweetEntitlements.cpp
+@@ -10,7 +10,7 @@
+  */
+ #include <pexpert/arm64/board_config.h>
+ 
+-#if defined(SWEET)
++#if defined(SWEET) || defined(A5XELTE)
+ #include <IOKit/IOLib.h>
+ #include <libkern/c++/OSArray.h>
+ #include <libkern/c++/OSBoolean.h>

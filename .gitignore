@@ -8,3 +8,9 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# on7xelte shim build output
+shim/on7xelte/outxnu/
+shim/on7xelte/out4k/
+shim/on7xelte/out4kc/
+shim/on7xelte/out/

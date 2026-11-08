@@ -1,0 +1,215 @@
+name: xnu
+
+on:
+  workflow_dispatch:
+    inputs:
+      macos_version:
+        description: macOS release whose xnu to build (13.5 = xnu-8796, iOS 16 era)
+        default: "13.5"
+      kernel_config:
+        description: RELEASE / DEVELOPMENT / DEBUG
+        default: DEVELOPMENT
+      machine_config:
+        description: xnu MACHINE_CONFIG
+        default: SWEET
+      keep_going:
+        description: make -k (collect all compile errors in one run)
+        default: "true"
+  push:
+    branches: [main]
+    paths:
+      - "xnu/patches/**"
+      - ".github/workflows/xnu.yml"
+
+concurrency:
+  group: xnu-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DXB_REPO: https://github.com/blacktop/darwin-xnu-build
+  DXB_SHA: 663906528d1cd5ea8fde7de6f16de73db9511549
+  MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
+  KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
+  MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+
+jobs:
+  build:
+    # macOS 13/14 runners are retired. macos-15 only ships Xcode 16+; its iig
+    # emits IORPC.kernelContent, so xnu/patches adds that KERNEL field to xnu-8796.
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch build script
+        run: |
+          git init -q dxb
+          git -C dxb fetch -q --depth 1 "$DXB_REPO" "$DXB_SHA"
+          git -C dxb checkout -q FETCH_HEAD
+          # 12.5-14.3 use the top-level patches dir; ours go next to blacktop's
+          cp xnu/patches/*.patch xnu/patches/*.sh dxb/patches/
+          # libfirehose_kernel is a separate Xcode build.  Build only its arm64
+          # slice; it is kernel code, so make the compile freestanding to use
+          # XNU's C11 atomic definitions, and target the lowest common CPU core
+          # (Cortex-A53 = ARMv8.0, no LSE).  Otherwise clang emits ARMv8.1
+          # ldadd/cas/swp and the kernel dies with "Undefined kernel
+          # instruction" in __firehose_buffer_tracepoint_flush.
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path("dxb/build.sh")
+          s = p.read_text()
+          old = 'ARCHS="x86_64 arm64e" VALID_ARCHS="x86_64 arm64e"'
+          new = 'ARCHS="arm64" VALID_ARCHS="arm64" OTHER_CFLAGS="-I${WORK_DIR}/xnu/EXTERNAL_HEADERS -I${WORK_DIR}/xnu/bsd -ffreestanding -mcpu=cortex-a53+crypto"'
+          if s.count(old) != 1:
+              raise SystemExit("pinned build.sh libfirehose target changed; refusing an unverified edit")
+          p.write_text(s.replace(old, new))
+          PY
+          grep -F 'ARCHS="arm64" VALID_ARCHS="arm64" OTHER_CFLAGS="-I${WORK_DIR}/xnu/EXTERNAL_HEADERS -I${WORK_DIR}/xnu/bsd -ffreestanding -mcpu=cortex-a53+crypto"' dxb/build.sh
+          ls dxb/patches
+
+      - name: Deps
+        run: |
+          brew install jq gum bash cmake ninja
+          # build.sh only checks that xcodes exists (Xcode is preinstalled); no bottle on macOS 14
+          printf '#!/bin/sh\nexit 0\n' | sudo tee /usr/local/bin/xcodes >/dev/null
+          sudo chmod +x /usr/local/bin/xcodes
+          sw_vers
+          ls -d /Applications/Xcode*.app
+          # Xcode 16.4 is the newest 16.x on macos-15 and matches the SDK used
+          # by the runner image; never silently fall back to Xcode 26.
+          XC=$(ls -d /Applications/Xcode_16.4*.app 2>/dev/null | sort -V | tail -1)
+          if [ -z "$XC" ]; then XC=$(ls -d /Applications/Xcode_16*.app 2>/dev/null | sort -V | tail -1); fi
+          if [ -z "$XC" ]; then echo "no Xcode 16.x found"; ls -d /Applications/Xcode*.app; exit 1; fi
+          echo "selected Xcode: $XC"
+          echo "DEVELOPER_DIR=$XC/Contents/Developer" >> "$GITHUB_ENV"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+          xcrun --find iig
+
+      - name: Use no-op KDK
+        run: |
+          # dxb refuses to build unless KDKROOT is an existing directory and
+          # otherwise downloads a ~628 MB KDK from a GitHub release asset.  But
+          # xnu only consumes the KDK here:
+          #   makedefs/MakeInc.def: LDFLAGS_KERNEL_ONLY += ... lib$(MACHINE).os...
+          # and that line is limited to T6000 T8101 VMAPPLE.  MACHINE_CONFIG is
+          # SWEET, so no KDK file is ever referenced.  GitHub's release CDN has
+          # been serving a 504 HTML page instead of the DMG, which dxb then
+          # tries to hdiutil-attach ("image not recognized").  Point dxb at an
+          # empty directory instead: the build is then independent of that CDN.
+          mkdir -p "$RUNNER_TEMP/kdk-none"
+          echo "KDKROOT=$RUNNER_TEMP/kdk-none" >> "$GITHUB_ENV"
+          echo "KDKROOT=$RUNNER_TEMP/kdk-none (SWEET links no KDK support lib)"
+
+      - name: Build
+        working-directory: dxb
+        env:
+          # keep going after errors so one run reports every compile failure
+          MAKEFLAGS: ${{ inputs.keep_going == 'false' && '' || '-k' }}
+        run: |
+          set -o pipefail
+          bash build.sh 2>&1 | tee ../xnu-build.log
+
+      - name: Scan built kernel for ARMv8.1 LSE instructions
+        run: |
+          set -euo pipefail
+          # Cortex-A73/A53 are ARMv8.0: an LSE (ldadd/cas/swp) in kernel text is
+          # an undefined-instruction panic waiting to happen.  This is exactly
+          # what killed probe #10 inside libfirehose_kernel.
+          python3 -m venv .venv-lse-check
+          . .venv-lse-check/bin/activate
+          python -m pip install --disable-pip-version-check 'capstone==5.0.6'
+          python tools/check-arm64-lse.py dxb/fakeroot/System/Library/Kernels/kernel.development.sweet
+
+      - name: Verify A10 port patches applied
+        run: |
+          # dxb applies patches with `git apply --check` and SKIPS a patch that
+          # does not apply, so a broken port patch would still yield a green
+          # build - with a stock kernel.  Fail the job if the A10 markers are
+          # missing from the patched source tree.
+          set -uo pipefail
+          fail=0
+          need() { # file pattern mode what
+            if [ ! -f "$1" ]; then echo "FAIL $4: $1 missing"; fail=1; return; fi
+            if grep -q -- "$2" "$1"; then
+              if [ "$3" = present ]; then echo "ok   $4"; else echo "FAIL $4: '$2' still present in $1"; fail=1; fi
+            else
+              if [ "$3" = absent ]; then echo "ok   $4"; else echo "FAIL $4: '$2' not found in $1"; fail=1; fi
+            fi
+          }
+          need dxb/xnu/pexpert/pexpert/arm64/SWEET.h 'SWEET_GICV2' present '0084 GICv2 support'
+          need dxb/xnu/pexpert/pexpert/arm64/SWEET.h '#define __ARM_16K_PG__' absent '0085 16K page knob removed'
+          need dxb/xnu/makedefs/MakeInc.def 'SWEET_4K_USERVA' present '0086 4K user VA'
+          need dxb/xnu/osfmk/arm64/arm_vm_init.c 'SWEET_EARLY_FB_PA   0xEC000000ULL' present '0087 early framebuffer'
+          need dxb/xnu/bsd/dev/sweet_emmc.c 'A10 Samsung DW-MMC0' present '0090 A10 eMMC driver'
+          need dxb/xnu/bsd/dev/sweet_emmc.c 'HDATA_WIDTH' present '0090 64-bit FIFO handling'
+          need dxb/xnu/bsd/kern/bsd_init.c 'SWEET root selection' present '0091 root diagnostics'
+          need dxb/xnu/bsd/vfs/vfs_subr.c 'SWEET root mount: bdev' present '0091 mount diagnostics'
+          need dxb/xnu/iokit/bsddev/IOKitBSDInit.cpp 'sweet_emmc_rootdev' present '0092 eMMC root hook'
+          need dxb/xnu/iokit/KernelConfigTables.cpp 'arm,cortex-a53' present '0093 A10 CPU personality'
+          need dxb/xnu/iokit/Kernel/arm/SweetCPU.cpp 'SWEET CPU: start node=' present '0093 CPU match logging'
+          need dxb/xnu/pexpert/arm/pe_init.c 'A10_IOKIT_MATCHING_RETURNED' present '0093 IOKit matching trace'
+          need dxb/xnu/pexpert/pexpert/arm64/SWEET.h 'GICD_SGIR_FILTER_SELF.*(2U << 24)' present '0094 GICv2 self-SGI filter'
+          need dxb/xnu/iokit/Kernel/arm/SweetCPU.cpp 'signal_enabled=%u' present '0094 CPU timeout diagnostics'
+          need dxb/xnu/osfmk/arm/pmap/pmap.c 'SWEET_EARLY_FB_VA' present '0095 early framebuffer VA reservation'
+          if [ "$fail" -ne 0 ]; then
+            echo "::error::A10 port patches did not apply cleanly"
+            exit 1
+          fi
+          echo "A10 port markers OK"
+
+      - name: Package build tree for local compiles
+        if: always()
+        run: |
+          # Generated headers, config option headers, mig output and the patched
+          # source: enough to re-run any single compile command from the log locally.
+          SDK=$(xcrun --sdk macosx --show-sdk-path)
+          mkdir -p sdk-kernel-platform
+          cp -R "$SDK/System/Library/Frameworks/Kernel.framework/Versions/A/PrivateHeaders/platform" sdk-kernel-platform/ || true
+          tar czf buildtree.tgz \
+            --exclude='*.o' --exclude='*.cpo' --exclude='*.a' --exclude='*.dSYM' --exclude='*.unstripped' \
+            --exclude='kernel.development.*' --exclude='.git' \
+            -C dxb build/xnu.obj fakeroot/usr/local/include xnu \
+            -C .. sdk-kernel-platform
+          ls -la buildtree.tgz
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-buildtree
+          path: buildtree.tgz
+          retention-days: 7
+
+      - name: Inspect closed KDK support libs
+        if: always()
+        run: |
+          shopt -s nullglob
+          mkdir -p out/kdk-libs
+          libs=(/Library/Developer/KDKs/*/System/Library/KernelSupport/lib*.a)
+          if [ ${#libs[@]} -eq 0 ]; then
+            echo "no installed KDK (SWEET never links one)" > out/kdk-libs/README.txt
+            ls -la out/kdk-libs
+            exit 0
+          fi
+          for lib in "${libs[@]}"; do
+            b=$(basename "$lib" .a)
+            ar t "$lib" > "out/kdk-libs/$b.members.txt" 2>&1 || true
+            nm -m "$lib" > "out/kdk-libs/$b.nm.txt" 2>&1 || true
+            lipo -info "$lib" >> out/kdk-libs/arch.txt 2>&1 || true
+          done
+          ls -la out/kdk-libs
+
+      - name: Collect
+        if: always()
+        run: |
+          mkdir -p out
+          cp -R dxb/fakeroot/System/Library/Kernels/. out/ 2>/dev/null || true
+          ls -la out
+          (cd out && shasum -a 256 kernel.* > SHA256SUMS) || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xnu-kernel
+          path: out/
+          if-no-files-found: warn

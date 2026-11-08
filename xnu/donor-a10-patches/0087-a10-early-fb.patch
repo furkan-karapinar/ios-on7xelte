@@ -8,8 +8,8 @@ index 06bb568..bc851f9 100644
   */
 -#define SWEET_EARLY_FB_VA (VM_MIN_KERNEL_ADDRESS + ARM_TT_L2_SIZE)
 +#define SWEET_EARLY_FB_VA (LOW_GLOBAL_BASE_ADDRESS + ARM_TT_L2_SIZE)
-+#define SWEET_EARLY_FB_PA   0xEC000000ULL
-+#define SWEET_EARLY_FB_SIZE 0x01400000ULL
++#define SWEET_EARLY_FB_PA   0x67000000ULL
++#define SWEET_EARLY_FB_SIZE 0x00800000ULL
 +#define SWEET_EARLY_FB_ENTS ((SWEET_EARLY_FB_SIZE + ARM_TT_L2_SIZE - 1) / ARM_TT_L2_SIZE)
  
  static void
@@ -48,13 +48,13 @@ index 374a679..4d0bcec 100644
 -	/* Stage 0: white 64x32 band, no stack or page tables needed. */
 -	MOV64	x0, (0x9c000000 + 2368 * 4320)
 +	/* Stage 0: white 64x8 band, no stack or page tables needed. */
-+	/* (a10 patch 0085) A10 fb: 0xEC000000, 720x1520, stride 2880 */
-+	MOV64	x0, (0xEC000000 + 1508 * 2880)
++	/* (on7xelte) fb: 0x67000000, 1080x1920, stride 4320 */
++	MOV64	x0, (0x67000000 + 1912 * 4320)
  	mov		w1, #-1
 -	mov		x2, #32
 -	mov		x4, #4320
 +	mov		x2, #8
-+	mov		x4, #2880
++	mov		x4, #4320
  Lsweet_mark_row:
  	mov		x3, #64
  	mov		x5, x0
@@ -63,7 +63,7 @@ index 374a679..4d0bcec 100644
  	 * without touching them.
  	 */
 -	MOV64	x10, 0x9c000000
-+	MOV64	x10, 0xEC000000			/* a10 patch 0085: SBOOT fb (was Redmi 0x9c000000) */
++	MOV64	x10, 0x67000000			/* on7xelte: SBOOT fb (was A10 0xEC000000) */
  	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
  	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
  	lsr		x12, x12, #(ARM_TT_L2_SHIFT)
@@ -71,7 +71,7 @@ index 374a679..4d0bcec 100644
  	add		x13, x13, x12, lsl #TTE_SHIFT
  	orr		x11, x11, x10
 -	MOV64	x12, (0x02000000 >> ARM_TT_L2_SHIFT)
-+	MOV64	x12, ((0x01400000 + (1 << ARM_TT_L2_SHIFT) - 1) >> ARM_TT_L2_SHIFT)	/* 20MB fb reserve, rounded up to L2 blocks */
++	MOV64	x12, ((0x00800000 + (1 << ARM_TT_L2_SHIFT) - 1) >> ARM_TT_L2_SHIFT)	/* 8MB fb reserve, rounded up to L2 blocks */
  	MOV64	x14, (1 << ARM_TT_L2_SHIFT)
  Lsweet_splash_r:
  	str		x11, [x13], #8
@@ -84,14 +84,14 @@ index 6928957..66c69c5 100644
  #include <kern/misc_protos.h>
  
 -static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
-+static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0xEC000000;
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x67000000;
  #define EARLY_FB early_fb
 -#define EARLY_WIDTH 1080u
 -#define EARLY_HEIGHT 2400u
 -#define EARLY_STRIDE (4320u / 4)
-+#define EARLY_WIDTH 720u	/* a10 patch 0085: s6d7at0b panel, stride 2880 B */
-+#define EARLY_HEIGHT 1520u
-+#define EARLY_STRIDE (2880u / 4)
++#define EARLY_WIDTH 1080u	/* on7xelte: 1080x1920 panel, stride 4320 B */
++#define EARLY_HEIGHT 1920u
++#define EARLY_STRIDE (4320u / 4)
  #define EARLY_SCALE 2u
  #define EARLY_CELL_W (8u * EARLY_SCALE)
  #define EARLY_CELL_H (16u * EARLY_SCALE)
