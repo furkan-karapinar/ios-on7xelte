@@ -19,7 +19,7 @@ Bütün 7870 adresleri WSL `~/j7prime-kernels/kernel_Exynos7870/` kaynağından:
 | `.github/workflows/xnu.yml` | ios-a51'in A5XELTE workflow'u (macos-14, `MACHINE_CONFIG=A5XELTE`) |
 | `tools/mkadt_a5xelte.py` + `tools/mkadt.py` | a51 sürümü; GIC 7870'e göre düzeltildi. ADT üretimi test edildi (9500 bayt) |
 | `shim/on7xelte/` | a5xelte shim'i; 7870 PMU/CMU/ekran gücü adresleri düzeltildi. WSL'de `aarch64-linux-gnu-gcc 15.2` ile `-Werror` derlendi: `outxnu/Image` 9760 B, `out4k/Image` 20480 B, Samsung header OK |
-| XNU build | **Henüz CI'da çalıştırılmadı** |
+| XNU build | Repo: github.com/furkan-karapinar/ios-on7xelte (public). CI `macos-15`'e taşındı (macos-14 kaldırıldı). İlk çalıştırma GitHub hesabındaki **fatura kilidi** yüzünden başlamadı |
 | Donanım testi | ✅ probe4k + probe4kc (2026-11-08): EL1 girişi, geçerli FDT, 4 KiB MMU açık yürütme ve framebuffer 0x67000000 çıktısı telefonda doğrulandı |
 
 ## 7580 → 7870 adres düzeltmeleri
